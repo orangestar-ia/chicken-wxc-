@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>连续围棋 - 在线对战</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        :root {
+            --bg: #0f0f1a; --panel: #1a1a2e; --gold: #f0c040;
+            --purple: #a855f7; --text: #e0e0e0; --sub: #a0a0a0; --border: #2a2a4a;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #0f0f1a, #1a1a2e);
+            font-family: 'PingFang SC','Microsoft YaHei',sans-serif;
+            min-height: 100vh; color: var(--text);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .container {
+            display: flex; gap: 20px; align-items: center;
+            padding: 20px; flex-wrap: wrap; justify-content: center;
+        }
+        canvas {
+            border: 2px solid var(--border); border-radius: 12px;
+            background: #deb887; cursor: crosshair; touch-action: none;
+        }
+        .panel {
+            background: var(--panel); border: 2px solid var(--border);
+            border-radius: 16px; padding: 20px; width: 240px;
+            display: flex; flex-direction: column; gap: 10px; text-align: center;
+        }
+        .timer { font-size: 28px; font-weight: 700; }
+        .timer.warn { color: #f59e0b; } .timer.danger { color: #dc2626; }
+        .cd-bar { height: 8px; background: #1e2a3a; border-radius: 4px; overflow: hidden; }
+        .cd-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+        .cd-black { background: var(--gold); } .cd-white { background: var(--purple); }
+        .label { font-size: 12px; color: var(--sub); }
+        .value { font-size: 18px; font-weight: 700; }
+        .gold { color: var(--gold); } .purple { color: var(--purple); }
+        .btn {
+            padding: 10px; border: none; border-radius: 10px;
+            font-size: 13px; font-weight: 600; cursor: pointer; width: 100%;
+            transition: all 0.2s; letter-spacing: 1px;
+        }
+        .btn-start { background: #22c55e; color: #fff; }
+        .btn-count { background: #3b82f6; color: #fff; }
+        .btn-reset { background: #dc2626; color: #fff; }
+        .btn-back { background: transparent; color: var(--sub); border: 1px dashed var(--border); }
+        .btn-menu { background: linear-gradient(135deg, var(--gold), #d4a020); color: #1a1a2e; padding: 14px; font-size: 15px; }
+        .btn-menu2 { background: linear-gradient(135deg, var(--purple), #7c3aed); color: #fff; padding: 14px; font-size: 15px; }
+        .btn:hover { transform: translateY(-1px); opacity: 0.9; }
+        .toggle-row {
+            display: flex; align-items: center; justify-content: center;
+            gap: 6px; font-size: 11px; color: var(--sub);
+        }
+        .toggle-row input { width: 16px; height: 16px; cursor: pointer; }
+        .room-info {
+            font-size: 11px; color: var(--sub); padding: 4px 8px;
+            background: #0d0d20; border-radius: 8px;
+        }
+        .toast {
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            padding: 10px 20px; border-radius: 20px; font-size: 14px; font-weight: 600;
+            z-index: 100; opacity: 0; transition: opacity 0.3s;
+        }
+        .toast.show { opacity: 1; }
+        .toast-error { background: #dc2626; color: #fff; }
+        .toast-info { background: #3b82f6; color: #fff; }
+        .toast-success { background: #22c55e; color: #fff; }
+        input {
+            padding: 10px; background: #0d0d20; border: 1px solid var(--border);
+            border-radius: 8px; color: var(--text); font-size: 14px; text-align: center;
+            width: 100%; outline: none;
+        }
+        select {
+            padding: 6px; background: #0d0d20; border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text); font-size: 11px; text-align: center;
+        }
+        .confirm-btn {
+            position: absolute; padding: 10px 16px; background: #22c55e;
+            color: #fff; border: none; border-radius: 10px; font-weight: 600;
+            cursor: pointer; z-index: 10; display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="toast" id="toast"></div>
+    <div class="container" id="mainContainer"></div>
+
+    <script>
+    // ==================== Supabase 配置 ====================
+    const SUPABASE_URL = "https://sfytmnbyqmiixufkzqil.supabase.co";
+    const SUPABASE_KEY = "sb_publishable_eJhXHIppG6G43H4M2o4m4w_0tCgMN2h";
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // ==================== 全局状态 ====================
+    let currentMode = null; // 'ai' | 'online'
+    let myColor = 'black';
+    let isWatch = false;
+    let roomId = null;
+    let isHost = false;
+    let myId = Math.random().toString(36).substr(2, 8);
+    let syncChannel = null;
+
+    // ==================== 引擎 ====================
+    const W=13,H=13,R=0.4,D=2*R,SQRT3_D=Math.sqrt(3)*D,EPS=1e-9,GRID_SP=0.14,CD_SEC=8,MAX_CHG=5,GAME_TIME=10*60;
+
+    const game = {
+        stones:[],moveCounts:{black:0,white:0},charges:{black:2,white:2},
+        cdProgress:{black:0,white:0},startTime:Date.now(),ended:false,started:false,_comboQueue:[],
+        dist(p,q){return Math.hypot(p[0]-q[0],p[1]-q[1])},
+        inBoard(x,y){return x>=0&&x<=W&&y>=0&&y<=H},
+        tick(dt){
+            for(let c of['black','white']){
+                if(this.charges[c]<MAX_CHG){this.cdProgress[c]+=dt/CD_SEC;if(this.cdProgress[c]>=1){this.cdProgress[c]-=1;this.charges[c]=Math.min(this.charges[c]+1,MAX_CHG)}}
+                else this.cdProgress[c]=1
+            }
+        },
+        remain(){return Math.max(0,GAME_TIME-(Date.now()-this.startTime)/1000)},
+        over(){return (this.started&&this.remain()<=0)||this.ended},
+        neighbors(idx,stones,md){const s=stones[idx],r=[];for(let i=0;i<stones.length;i++){if(i!==idx&&stones[i][2]===s[2]&&this.dist([s[0],s[1]],[stones[i][0],stones[i][1]])<md-EPS)r.push(i)}return r},
+        group(idx,stones){const v=new Set([idx]),q=[idx];while(q.length){const u=q.shift();for(const n of this.neighbors(u,stones,SQRT3_D)){if(!v.has(n)){v.add(n);q.push(n)}}}return v},
+        sample(cx,cy){const p=[];for(let i=1;i<=3;i++){const rad=D+(SQRT3_D-D)*i/4;for(let j=0;j<8;j++){const th=2*Math.PI*j/8,x=cx+rad*Math.cos(th),y=cy+rad*Math.sin(th);if(this.inBoard(x,y))p.push([x,y])}}return p},
+        libs(gidxs,stones){for(const i of gidxs){const s=stones[i];for(const p of this.sample(s[0],s[1])){if(stones.every(o=>this.dist(p,[o[0],o[1]])>=D-EPS))return true}}return false},
+        groups(stones,color){const v=new Set(),g=[];for(let i=0;i<stones.length;i++){if(stones[i][2]===color&&!v.has(i)){const gr=this.group(i,stones);gr.forEach(x=>v.add(x));g.push(gr)}}return g},
+        legal(x,y,color){
+            if(!this.inBoard(x,y))return false;
+            if(this.stones.some(s=>this.dist([x,y],[s[0],s[1]])<D-EPS))return false;
+            const temp=[...this.stones,[x,y,color,-1]];let ni=temp.length-1;
+            const opp=color==='black'?'white':'black';const gs=this.groups(temp,opp);const rem=new Set();
+            for(const g of gs){if(!this.libs(g,temp))g.forEach(v=>rem.add(v))}
+            let t2=temp;if(rem.size>0){t2=temp.filter((_,i)=>!rem.has(i));const f=t2.findIndex(s=>s[0]===x&&s[1]===y&&s[2]===color);if(f===-1)return false;ni=f}else ni=t2.length-1;
+            return this.libs(this.group(ni,t2),t2)
+        },
+        place(x,y,color){
+            if(!this.legal(x,y,color)||this.charges[color]<=0)return false;
+            this.charges[color]--;if(this.charges[color]<MAX_CHG)this.cdProgress[color]=0;
+            this.moveCounts[color]++;this.stones.push([x,y,color,this.moveCounts[color]]);
+            const opp=color==='black'?'white':'black';const gs=this.groups(this.stones,opp);const rem=new Set();
+            for(const g of gs){if(!this.libs(g,this.stones))g.forEach(v=>rem.add(v))}
+            if(rem.size>0)this.stones=this.stones.filter((_,i)=>!rem.has(i));
+            return true
+        },
+        edges(color){const same=this.stones.filter(s=>s[2]===color),e=[];for(let i=0;i<same.length;i++)for(let j=i+1;j<same.length;j++)if(this.dist([same[i][0],same[i][1]],[same[j][0],same[j][1]])<SQRT3_D-EPS)e.push([[same[i][0],same[i][1]],[same[j][0],same[j][1]]]);return e},
+        territory(){
+            const sp=GRID_SP,cols=Math.floor(W/sp)+1,rows=Math.floor(H/sp)+1;const bp=[],wp=[];let ba=0,wa=0;
+            for(let r=0;r<rows;r++)for(let c=0;c<cols;c++){
+                const wx=(c+.5)*sp,wy=(r+.5)*sp;if(!this.inBoard(wx,wy))continue;
+                const close=[];for(const s of this.stones){const d=this.dist([wx,wy],[s[0],s[1]]);if(d<D-EPS)close.push([d,s[2]])}
+                if(close.length>0){const md=Math.min(...close.map(cs=>cs[0]));const best=[...new Set(close.filter(cs=>cs[0]===md).map(cs=>cs[1]))];if(best.length===1){if(best[0]==='black'){ba+=sp*sp;bp.push([wx,wy])}else{wa+=sp*sp;wp.push([wx,wy])}}continue}
+                let bi=0,wi=0;for(const s of this.stones){const d=this.dist([wx,wy],[s[0],s[1]]);let w=0;if(d<SQRT3_D)w=1;else if(d<2.5*D)w=Math.max(0,1-(d-SQRT3_D)/(2.5*D-SQRT3_D));if(s[2]==='black')bi+=w;else wi+=w}
+                const ed=Math.min(wx,W-wx,wy,H-wy);if(ed<D&&this.stones.length>0){let cl=this.stones[0],md2=this.dist([wx,wy],[cl[0],cl[1]]);for(const s of this.stones){const d2=this.dist([wx,wy],[s[0],s[1]]);if(d2<md2){md2=d2;cl=s}}if(cl[2]==='black')bi+=.5;else wi+=.5}
+                const tot=bi+wi;if(tot===0)continue;const ratio=bi/tot;if(ratio>.7){ba+=sp*sp;bp.push([wx,wy])}else if(ratio<.3){wa+=sp*sp;wp.push([wx,wy])}
+            }
+            return{blackArea:ba,whiteArea:wa,blackPts:bp,whitePts:wp}
+        }
+    };
+
+    // ==================== AI ====================
+    function countLibs(groupStones){const s=new Set();for(const st of groupStones){for(const p of game.sample(st[0],st[1])){if(game.stones.every(o=>game.dist(p,[o[0],o[1]])>=D-EPS))s.add(p[0]+','+p[1])}}return s.size}
+    function findKillMoves(color){
+        const opp=color==='black'?'white':'black',kills=[];
+        for(const g of game.groups(game.stones,opp)){const gs=[...g].map(i=>game.stones[i]),lc=countLibs(gs);
+            if(lc===1){for(const st of gs)for(const p of game.sample(st[0],st[1])){if(game.stones.every(o=>game.dist(p,[o[0],o[1]])>=D-EPS)&&game.legal(p[0],p[1],color)){kills.push([...p,0.7,1]);break}}}
+            else if(lc===2){const lp=[];for(const st of gs)for(const p of game.sample(st[0],st[1])){if(game.stones.every(o=>game.dist(p,[o[0],o[1]])>=D-EPS)&&!lp.some(x=>x[0]===p[0]&&x[1]===p[1]))lp.push(p)}if(lp.length){const r=lp[Math.floor(Math.random()*lp.length)];if(game.legal(r[0],r[1],color))kills.push([r[0],r[1],0.4,2])}}
+            else if(gs.length<=2&&lc<=4){const lp=[];for(const st of gs)for(const p of game.sample(st[0],st[1])){if(game.stones.every(o=>game.dist(p,[o[0],o[1]])>=D-EPS)&&!lp.some(x=>x[0]===p[0]&&x[1]===p[1]))lp.push(p)}if(lp.length){const r=lp[Math.floor(Math.random()*lp.length)];if(game.legal(r[0],r[1],color))kills.push([r[0],r[1],0.2,3])}}
+        }
+        return kills
+    }
+    function aiMove(){
+        const color='white',deadline=Date.now()+5000;
+        const kills=findKillMoves(color);
+        if(kills.length){const tp=kills.reduce((a,c)=>a+c[2],0);let r=Math.random(),cum=0;for(const k of kills){cum+=k[2]/tp;if(r<=cum)return[k[0],k[1]]}}
+        const same=game.stones.filter(s=>s[2]===color),enemy=game.stones.filter(s=>s[2]!==color);
+        const cands=[];
+        const add=(x,y,w)=>{if(game.legal(x,y,color))cands.push([x,y,w])};
+        const total=game.moveCounts.black+game.moveCounts.white;
+        if(total<8){for(const s of same){for(const ey of[0.5,H-0.5])if(Math.abs(s[1]-ey)<2*D)for(let a=0;a<4;a++){const rad=2*Math.PI*a/4;add(s[0]+D*Math.cos(rad),ey+D*Math.sin(rad),1.5)}}}
+        if(enemy.length&&same.length>=2)for(const s of enemy)for(let a=0;a<6;a++){const rad=2*Math.PI*a/6;add(s[0]+D*0.9*Math.cos(rad),s[1]+D*0.9*Math.sin(rad),2.5)}
+        if(total>=10&&game.charges[color]>=3&&Math.random()<0.25){
+            for(const g of game.groups(game.stones,color==='black'?'white':'black')){
+                if(g.size<=2){const gs=[...g].map(i=>game.stones[i]);
+                    for(const s of gs){if(s[0]<D*3||s[0]>W-D*3||s[1]<D*3||s[1]>H-D*3){
+                        const pts=[];for(const dx of[D,SQRT3_D])for(let a=0;a<12;a++){const rad=2*Math.PI*a/12,x=s[0]+dx*Math.cos(rad),y=s[1]+dx*Math.sin(rad);if(game.inBoard(x,y)&&game.legal(x,y,color))pts.push([x,y])}
+                        if(pts.length>=2){game._comboQueue=pts.slice(0,Math.random()<0.6?3:2);return null}
+                    }}
+                }
+            }
+        }
+        if(!cands.length){for(let i=0;i<8;i++){const x=(Math.random()*12+0.5),y=(Math.random()*12+0.5);if(game.legal(x,y,color))cands.push([x,y,1])}}
+        const tw=cands.reduce((a,c)=>a+c[2],0);let r=Math.random()*tw,cum=0;
+        for(const c of cands){cum+=c[2];if(r<=cum)return[c[0],c[1]]}
+        return cands[0]?.slice(0,2)||[6.5,6.5]
+    }
+
+    // ==================== 在线对战 ====================
+    async function createRoom(){
+        const r=document.getElementById('roomInput').value.trim();if(!r)return toast('请输入房间号','error');
+        roomId=r;isHost=true;myColor='black';
+        const{data}=await supabase.from('rooms').select().eq('id',r);
+        if(data.length){toast('房间已存在','error');return}
+        await supabase.from('rooms').insert({id:r,data:{stones:[],moveCounts:{black:0,white:0},charges:{black:2,white:2},cdProgress:{black:0,white:0},startTime:null,started:false,ended:false,black:myId,white:null}});
+        enterOnline();
+    }
+    async function joinRoom(){
+        const r=document.getElementById('roomInput').value.trim();if(!r)return toast('请输入房间号','error');
+        roomId=r;isHost=false;
+        const{data}=await supabase.from('rooms').select().eq('id',r);
+        if(!data.length)return toast('房间不存在','error');
+        const d=data[0].data;if(d.started)return toast('对局已开始,请观战','error');
+        if(!d.white){myColor='white';await supabase.from('rooms').update({data:{...d,white:myId}}).eq('id',r);enterOnline()}
+        else{myColor=null;isWatch=true;enterOnline()}
+    }
+    function enterOnline(){
+        loadFromData();syncChannel=supabase.channel('room-'+roomId).on('postgres_changes',{event:'UPDATE',schema:'public',table:'rooms',filter:'id=eq.'+roomId},()=>loadFromData()).subscribe();
+        showGameRoom()
+    }
+    async function loadFromData(){
+        const{data}=await supabase.from('rooms').select().eq('id',roomId);
+        if(!data.length)return;const d=data[0].data;
+        game.stones=d.stones||[];game.moveCounts=d.moveCounts||{black:0,white:0};
+        game.charges=d.charges||{black:2,white:2};game.cdProgress=d.cdProgress||{black:0,white:0};
+        game.startTime=d.startTime||Date.now();game.started=d.started||false;game.ended=d.ended||false;
+    }
+    async function syncToDB(){
+        const{data}=await supabase.from('rooms').select().eq('id',roomId);
+        if(!data.length)return;await supabase.from('rooms').update({data:{...data[0].data,stones:game.stones,moveCounts:game.moveCounts,charges:game.charges,cdProgress:game.cdProgress,startTime:game.startTime,started:game.started,ended:game.ended}}).eq('id',roomId);
+    }
+    async function startOnlineGame(){
+        if(!isHost)return toast('只有房主能开始','error');
+        const{data}=await supabase.from('rooms').select().eq('id',roomId);
+        if(!data.length)return;const d=data[0].data;
+        if(!d.black||!d.white)return toast('等待对手','error');
+        game.started=true;game.startTime=Date.now();await syncToDB();
+    }
+
+    // ==================== 界面渲染 ====================
+    let canvas,ctx,menuDiv,showTerritory=true,showLines=true,showNums=true,mobileMode=false,aiBlack=true,aiWhite=false,hover=null;
+    function renderMenu(){
+        const c=document.getElementById('mainContainer');c.innerHTML='';
+        const d=document.createElement('div');d.style.cssText='background:var(--panel);border:2px solid var(--border);border-radius:24px;padding:50px 40px;text-align:center;max-width:440px;';
+        d.innerHTML=`<div style="font-size:60px;margin-bottom:10px;">🌍</div><div style="font-size:30px;font-weight:700;margin-bottom:4px;"><span style="color:var(--gold);">连续</span><span style="color:var(--purple);">围棋</span></div><div style="font-size:13px;color:var(--sub);letter-spacing:3px;margin-bottom:24px;">开 放 大 世 界 · 在 线 对 战</div><button class="btn btn-menu" onclick="startAIMode()" style="margin-bottom:12px;">🤖 人机对战</button><button class="btn btn-menu2" onclick="showOnlineLobby()">🌍 在线对战</button>`;
+        c.appendChild(d)
+    }
+    function startAIMode(){
+        currentMode='ai';myColor='black';game.stones=[];game.moveCounts={black:0,white:0};game.charges={black:2,white:2};game.cdProgress={black:0,white:0};game.startTime=Date.now();game.ended=false;game.started=true;game._comboQueue=[];
+        showGameRoom()
+    }
+    function showOnlineLobby(){
+        const c=document.getElementById('mainContainer');c.innerHTML='';
+        const d=document.createElement('div');d.style.cssText='background:var(--panel);border:2px solid var(--border);border-radius:24px;padding:40px;text-align:center;max-width:440px;';
+        d.innerHTML=`<div style="font-size:18px;font-weight:700;margin-bottom:16px;">🌍 在线对战</div><input id="roomInput" placeholder="输入房间号..." maxlength="20"><div style="display:flex;gap:10px;margin-top:12px;"><button class="btn btn-menu" onclick="createRoom()" style="flex:1;">🏠 创建</button><button class="btn btn-menu2" onclick="joinRoom()" style="flex:1;">⚔️ 加入</button></div><button class="btn btn-back" onclick="renderMenu()" style="margin-top:12px;">返回</button>`;
+        c.appendChild(d)
+    }
+    function showGameRoom(){
+        const c=document.getElementById('mainContainer');c.innerHTML='';
+        c.style.cssText='display:flex;gap:20px;align-items:center;padding:20px;flex-wrap:wrap;justify-content:center;';
+        canvas=document.createElement('canvas');canvas.width=650;canvas.height=650;canvas.style.cssText='border:2px solid var(--border);border-radius:12px;background:#deb887;cursor:crosshair;';
+        c.appendChild(canvas);ctx=canvas.getContext('2d');
+        const p=document.createElement('div');p.className='panel';
+        p.innerHTML=`<div class="timer" id="timer">10:00</div><div class="room-info" id="roomInfo">${currentMode==='online'?'房间:'+roomId:'人机对战'}</div>
+        <div><div class="label">⚫ 黑方</div><div class="toggle-row"><span>👤</span><input type="checkbox" id="aiBlack" ${aiBlack?'checked':''}><span>🤖</span></div><div class="value gold" id="blackStones">0子</div><div class="cd-bar"><div class="cd-fill cd-black" id="blackCD"></div></div><div style="font-size:11px;color:var(--sub)" id="blackCDText">CD: 2/5</div></div>
+        <div><div class="label">⚪ 白方</div><div class="toggle-row"><span>👤</span><input type="checkbox" id="aiWhite" ${aiWhite?'checked':''}><span>🤖</span></div><div class="value purple" id="whiteStones">0子</div><div class="cd-bar"><div class="cd-fill cd-white" id="whiteCD"></div></div><div style="font-size:11px;color:var(--sub)" id="whiteCDText">CD: 2/5</div></div>
+        <div><div class="label">🏆 势力目</div><div class="value" style="font-size:14px" id="territoryDisplay">黑 -- 白 --</div></div>
+        <div class="toggle-row"><input type="checkbox" id="showTerritory" checked onchange="showTerritory=this.checked"><label>势力</label><input type="checkbox" id="showLines" checked onchange="showLines=this.checked"><label>连线</label><input type="checkbox" id="showNums" checked onchange="showNums=this.checked"><label>手数</label><input type="checkbox" id="mobileMode" onchange="mobileMode=this.checked"><label>移动</label></div>
+        <button class="btn btn-start" id="btnStart" onclick="startOnlineGame()" style="display:${currentMode==='online'&&isHost?'block':'none'};">开始对局</button>
+        <button class="btn btn-count" onclick="pointCount()">🎯 点目</button><button class="btn btn-reset" onclick="resetGame()">🔄 重新开始</button><button class="btn btn-back" onclick="exitGame()">🏠 返回</button>`;
+        c.appendChild(p);
+        if(/Mobi|Android/i.test(navigator.userAgent)){mobileMode=true;document.getElementById('mobileMode').checked=true}
+        document.getElementById('aiBlack').onchange=function(){aiBlack=this.checked;if(currentMode==='ai')scheduleAI()};
+        document.getElementById('aiWhite').onchange=function(){aiWhite=this.checked;if(currentMode==='ai')scheduleAI()};
+        canvas.addEventListener('mousemove',e=>{const r=canvas.getBoundingClientRect();hover=[e.clientX-r.left,e.clientY-r.top]});
+        canvas.addEventListener('mouseleave',()=>{hover=null});
+        canvas.addEventListener('click',handleClick);
+        canvas.addEventListener('touchstart',handleTouchStart);
+        canvas.addEventListener('touchmove',handleTouchMove);
+        canvas.addEventListener('touchend',handleTouchEnd);
+        lastTime=Date.now();if(currentMode==='ai')scheduleAI();loop()
+    }
+    let touchPreview=null,touchConfirm=null;
+    function handleTouchStart(e){e.preventDefault();if(!mobileMode){handleClick(e);return}const r=canvas.getBoundingClientRect();const tx=e.touches[0].clientX-r.left,ty=e.touches[0].clientY-r.top;touchPreview=[tx,ty];removeConfirm()}
+    function handleTouchMove(e){e.preventDefault();if(!mobileMode)return;const r=canvas.getBoundingClientRect();touchPreview=[e.touches[0].clientX-r.left,e.touches[0].clientY-r.top]}
+    function handleTouchEnd(e){e.preventDefault();if(!mobileMode||!touchPreview)return;const r=canvas.getBoundingClientRect();const bx=(touchPreview[0]-30)/((650-60)/W),by=(touchPreview[1]-30)/((650-60)/H);if(!game.legal(bx,by,myColor)){touchPreview=null;return}showConfirm(bx,by,touchPreview[0],touchPreview[1])}
+    function showConfirm(bx,by,sx,sy){removeConfirm();touchConfirm=document.createElement('button');touchConfirm.className='confirm-btn';touchConfirm.textContent='✅ 落子';touchConfirm.style.left=sx+'px';touchConfirm.style.top=(sy-40)+'px';touchConfirm.onclick=()=>{doPlace(bx,by);removeConfirm();touchPreview=null};document.body.appendChild(touchConfirm)}
+    function removeConfirm(){if(touchConfirm){touchConfirm.remove();touchConfirm=null}}
+    function handleClick(e){if(mobileMode)return;const r=canvas.getBoundingClientRect();doPlace((e.clientX-r.left-30)/((650-60)/W),(e.clientY-r.top-30)/((650-60)/H))}
+    function doPlace(bx,by){
+        if(game.over()||!game.started){toast('对局未开始或已结束','error');return}
+        if(myColor&&game.charges[myColor]<=0){toast('等待CD','error');return}
+        if(currentMode==='ai'){if(!game.place(bx,by,myColor||'black'))toast('不能落子','error')}
+        else{if(myColor){if(game.place(bx,by,myColor))syncToDB();else toast('不能落子','error')}}
+    }
+    function scheduleAI(){
+        if(currentMode!=='ai'||!game.started||game.over())return;
+        const doAI=()=>{
+            if(game.charges.white<=0||game.over()){setTimeout(scheduleAI,1000);return}
+            if(game._comboQueue.length){const m=game._comboQueue.shift();game.place(m[0],m[1],'white');setTimeout(()=>scheduleAI(),1000);return}
+            const m=aiMove();if(m)game.place(m[0],m[1],'white');setTimeout(scheduleAI,1500+Math.random()*2000)
+        };
+        if((aiBlack&&myColor!=='black')||(aiWhite&&myColor!=='white'))setTimeout(doAI,1000)
+    }
+    function draw(){
+        ctx.clearRect(0,0,650,650);
+        ctx.strokeStyle='#999';ctx.lineWidth=.5;ctx.setLineDash([1,3]);
+        for(let i=0;i<=W;i++){const x=30+i*(590/W);ctx.beginPath();ctx.moveTo(x,30);ctx.lineTo(x,620);ctx.stroke()}
+        for(let i=0;i<=H;i++){const y=30+i*(590/H);ctx.beginPath();ctx.moveTo(30,y);ctx.lineTo(620,y);ctx.stroke()}
+        ctx.setLineDash([]);
+        for(const[sx,sy]of[[4,4],[4,W-4],[H-4,4],[H-4,W-4]]){ctx.fillStyle='black';ctx.beginPath();ctx.arc(30+sx*(590/W),30+sy*(590/H),3,0,Math.PI*2);ctx.fill()}
+        if(showTerritory){const t=game.territory(),half=GRID_SP*(590/W)/1.8;ctx.globalAlpha=.35;ctx.fillStyle='#222';for(const p of t.blackPts){const s=[30+p[0]*(590/W),30+p[1]*(590/H)];ctx.fillRect(s[0]-half,s[1]-half,half*2,half*2)}ctx.fillStyle='#ddd';for(const p of t.whitePts){const s=[30+p[0]*(590/W),30+p[1]*(590/H)];ctx.fillRect(s[0]-half,s[1]-half,half*2,half*2)}ctx.globalAlpha=1}
+        if(showLines)for(const c of['black','white'])for(const e of game.edges(c)){ctx.beginPath();ctx.moveTo(30+e[0][0]*(590/W),30+e[0][1]*(590/H));ctx.lineTo(30+e[1][0]*(590/W),30+e[1][1]*(590/H));ctx.strokeStyle=c==='black'?'#FFD700':'#9B30FF';ctx.lineWidth=3;ctx.lineCap='round';ctx.stroke()}
+        for(const s of game.stones){const sx=30+s[0]*(590/W),sy=30+s[1]*(590/H),r=R*(590/W);ctx.beginPath();ctx.arc(sx,sy,r,0,Math.PI*2);ctx.fillStyle=s[2]==='black'?'black':'white';ctx.fill();ctx.strokeStyle=s[2]==='black'?'white':'black';ctx.lineWidth=1.5;ctx.stroke();if(showNums){ctx.fillStyle=s[2]==='black'?'white':'black';ctx.font=`${r*.8}px Arial`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(s[3],sx,sy)}}
+        if(hover&&!game.over()&&game.started&&((currentMode==='ai'&&myColor==='black'&&!aiBlack)||currentMode==='online')){const bx=(hover[0]-30)/(590/W),by=(hover[1]-30)/(590/H);if(game.inBoard(bx,by)){const sx=30+bx*(590/W),sy=30+by*(590/H),r=R*(590/W);ctx.beginPath();ctx.arc(sx,sy,r,0,Math.PI*2);ctx.strokeStyle=game.legal(bx,by,myColor||'black')?'#22c55e':'#dc2626';ctx.lineWidth=2;ctx.setLineDash([4,3]);ctx.stroke();ctx.setLineDash([])}}
+    }
+    function updateUI(){
+        const t=game.territory(),rem=game.remain();if(document.getElementById('timer')){const m=Math.floor(rem/60),s=Math.floor(rem%60);document.getElementById('timer').textContent=game.started?`${m}:${s.toString().padStart(2,'0')}`:'--:--';document.getElementById('timer').className='timer'+(game.started&&rem<120?' danger':game.started&&rem<300?' warn':'')}
+        if(document.getElementById('blackStones'))document.getElementById('blackStones').textContent=game.moveCounts.black+'子';
+        if(document.getElementById('whiteStones'))document.getElementById('whiteStones').textContent=game.moveCounts.white+'子';
+        if(document.getElementById('blackCD')){document.getElementById('blackCD').style.width=(game.cdProgress.black*100)+'%';document.getElementById('blackCDText').textContent=`CD: ${game.charges.black}/${MAX_CHG}`}
+        if(document.getElementById('whiteCD')){document.getElementById('whiteCD').style.width=(game.cdProgress.white*100)+'%';document.getElementById('whiteCDText').textContent=`CD: ${game.charges.white}/${MAX_CHG}`}
+        if(document.getElementById('territoryDisplay'))document.getElementById('territoryDisplay').textContent=`黑 ${t.blackArea.toFixed(1)} 白 ${t.whiteArea.toFixed(1)}`
+    }
+    function pointCount(){const t=game.territory();toast(`🏆 黑 ${t.blackArea.toFixed(1)} 目 | 白 ${t.whiteArea.toFixed(1)} 目`,'success')}
+    function resetGame(){game.stones=[];game.moveCounts={black:0,white:0};game.charges={black:2,white:2};game.cdProgress={black:0,white:0};game.startTime=Date.now();game.ended=false;game.started=currentMode==='ai';game._comboQueue=[]}
+    function exitGame(){
+        if(syncChannel){supabase.removeChannel(syncChannel);syncChannel=null}
+        roomId=null;isHost=false;myColor=null;isWatch=false;game.stones=[];game.started=false;renderMenu()
+    }
+    function toast(msg,type){const t=document.getElementById('toast');t.textContent=msg;t.className='toast toast-'+(type||'info')+' show';clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2500)}
+    let lastTime=Date.now();
+    function loop(){
+        const now=Date.now();game.tick((now-lastTime)/1000);lastTime=now;
+        if(game.over()&&game.started){game.ended=true;if(currentMode==='online'&&isHost)syncToDB();const t=game.territory();toast(`🏁 ${t.blackArea>t.whiteArea?'黑方':t.whiteArea>t.blackArea?'白方':'平局'}胜！`,'success')}
+        if(canvas){draw();updateUI()}requestAnimationFrame(loop)
+    }
+    renderMenu();
+    </script>
+</body>
+</html>
